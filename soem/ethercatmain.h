@@ -100,6 +100,8 @@ PACKED_END
 
 #define EC_SMENABLEMASK      0xfffeffff
 
+typedef struct ecx_context ecx_contextt;
+
 /** for list of ethercat slaves detected */
 typedef struct ec_slave
 {
@@ -225,8 +227,10 @@ typedef struct ec_slave
    uint8            FMMUunused;
    /** Boolean for tracking whether the slave is (not) responding, not used/set by the SOEM library */
    boolean          islost;
-   /** registered configuration function PO->SO */
+   /** registered configuration function PO->SO, (DEPRECATED)*/
    int              (*PO2SOconfig)(uint16 slave);
+   /** registered configuration function PO->SO */
+   int              (*PO2SOconfigx)(ecx_contextt * context, uint16 slave);
    /** readable name */
    char             name[EC_MAXNAME + 1];
 } ec_slavet;
@@ -336,6 +340,7 @@ typedef struct ec_idxstack
    uint8   idx[EC_MAXBUF];
    void    *data[EC_MAXBUF];
    uint16  length[EC_MAXBUF];
+   uint16  dcoffset[EC_MAXBUF];
 } ec_idxstackT;
 
 /** ringbuf for error storage */
@@ -377,7 +382,6 @@ typedef struct PACKED ec_PDOdesc
 PACKED_END
 
 /** Context structure , referenced by all ecx functions*/
-typedef struct ecx_context ecx_contextt;
 struct ecx_context
 {
    /** port reference, may include red_port */
@@ -404,10 +408,6 @@ struct ecx_context
    ec_idxstackT   *idxstack;
    /** reference to ecaterror state */
    boolean        *ecaterror;
-   /** internal, position of DC datagram in process data packet */
-   uint16         DCtO;
-   /** internal, length of DC datagram */
-   uint16         DCl;
    /** reference to last DC time from slaves */
    int64          *DCtime;
    /** internal, SM buffer */
@@ -424,6 +424,11 @@ struct ecx_context
    int            (*FOEhook)(uint16 slave, int packetnumber, int datasize);
    /** registered EoE hook */
    int            (*EOEhook)(ecx_contextt * context, uint16 slave, void * eoembx);
+   /** flag to control legacy automatic state change or manual state change */
+   int            manualstatechange;
+   /** userdata, promotes application configuration esp. in EC_VER2 with multiple 
+    * ec_context instances. Note: userdata memory is managed by application, not SOEM */
+   void           *userdata;
 };
 
 #ifdef EC_VER1
@@ -451,7 +456,7 @@ void ec_siistring(char *str, uint16 slave, uint16 Sn);
 uint16 ec_siiFMMU(uint16 slave, ec_eepromFMMUt* FMMU);
 uint16 ec_siiSM(uint16 slave, ec_eepromSMt* SM);
 uint16 ec_siiSMnext(uint16 slave, ec_eepromSMt* SM, uint16 n);
-int ec_siiPDO(uint16 slave, ec_eepromPDOt* PDO, uint8 t);
+uint32 ec_siiPDO(uint16 slave, ec_eepromPDOt* PDO, uint8 t);
 int ec_readstate(void);
 int ec_writestate(uint16 slave);
 uint16 ec_statecheck(uint16 slave, uint16 reqstate, int timeout);
@@ -494,7 +499,7 @@ void ecx_siistring(ecx_contextt *context, char *str, uint16 slave, uint16 Sn);
 uint16 ecx_siiFMMU(ecx_contextt *context, uint16 slave, ec_eepromFMMUt* FMMU);
 uint16 ecx_siiSM(ecx_contextt *context, uint16 slave, ec_eepromSMt* SM);
 uint16 ecx_siiSMnext(ecx_contextt *context, uint16 slave, ec_eepromSMt* SM, uint16 n);
-int ecx_siiPDO(ecx_contextt *context, uint16 slave, ec_eepromPDOt* PDO, uint8 t);
+uint32 ecx_siiPDO(ecx_contextt *context, uint16 slave, ec_eepromPDOt* PDO, uint8 t);
 int ecx_readstate(ecx_contextt *context);
 int ecx_writestate(ecx_contextt *context, uint16 slave);
 uint16 ecx_statecheck(ecx_contextt *context, uint16 slave, uint16 reqstate, int timeout);

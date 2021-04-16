@@ -31,11 +31,14 @@
  * This layer if fully transparent for the higher layers.
  */
 
+#include <vxWorks.h>
 #include <ctype.h>
 #include <string.h>
-#include <ipProto.h> 
-#include <vxWorks.h>
-#include <wvLib.h> 
+#include <stdio.h>
+#include <muxLib.h>
+#include <ipProto.h>
+#include <wvLib.h>
+#include <sysLib.h>
 
 #include "oshw.h"
 #include "osal.h"
@@ -96,6 +99,10 @@ const uint16 secMAC[3] = { 0x0404, 0x0404, 0x0404 };
 /** second MAC word is used for identification */
 #define RX_SEC secMAC[1]
 
+/* usec per tick for timeconversion, default to 1kHz */
+#define USECS_PER_SEC 1000000
+static unsigned int usec_per_tick = 1000;
+
 /** Receive hook called by Mux driver. */
 static int mux_rx_callback(void* pCookie, long type, M_BLK_ID pMblk, LL_HDR_INFO *llHdrInfo, void *muxUserArg);
 
@@ -126,6 +133,11 @@ int ecx_setupnic(ecx_portt *port, const char *ifname, int secondary)
    int unit_no = -1;   
    ETHERCAT_PKT_DEV * pPktDev;
 
+   /* Get systick info, sysClkRateGet return ticks per second */
+   usec_per_tick =  USECS_PER_SEC / sysClkRateGet();
+   /* Don't allow 0 since it is used in DIV */
+   if(usec_per_tick == 0)
+      usec_per_tick = 1;
    /* Make reference to packet device struct, keep track if the packet
     * device is the redundant or not.
     */
@@ -139,14 +151,14 @@ int ecx_setupnic(ecx_portt *port, const char *ifname, int secondary)
        pPktDev = &(port->pktDev);
        pPktDev->redundant = 0;
    }
-   
+
    /* Clear frame counters*/
    pPktDev->tx_count = 0;
    pPktDev->rx_count = 0;
    pPktDev->overrun_count = 0;
 
    /* Create multi-thread support semaphores */
-   port->sem_get_index = semBCreate(SEM_Q_FIFO, SEM_FULL);
+   port->sem_get_index = semMCreate(SEM_Q_PRIORITY | SEM_INVERSION_SAFE);
    
    /* Get the dev name and unit from ifname 
     * We assume form gei1, fei0... 
@@ -162,23 +174,32 @@ int ecx_setupnic(ecx_portt *port, const char *ifname, int secondary)
           break;
        }
    }
-   
+
    /* Detach IP stack */
    //ipDetach(pktDev.unit,pktDev.name);
-   
+
    pPktDev->port = port;
-               
+
    /* Bind to mux driver for given interface, include ethercat driver pointer 
      * as user reference 
      */
    /* Bind to mux */
-   pPktDev->pCookie = muxBind(ifn, unit_no, mux_rx_callback, NULL, NULL, NULL, MUX_PROTO_SNARF, "ECAT SNARF", pPktDev);
+   pPktDev->pCookie = muxBind(ifn,
+                              unit_no, 
+                              mux_rx_callback, 
+                              NULL, 
+                              NULL, 
+                              NULL, 
+                              MUX_PROTO_SNARF, 
+                              "ECAT SNARF", 
+                              pPktDev);
 
    if (pPktDev->pCookie == NULL)
    {
-       /* fail */
-       NIC_LOGMSG("ecx_setupnic: muxBind init for gei: %d failed\n", unit_no, 2, 3, 4, 5, 6);
-       goto exit;
+      /* fail */
+      NIC_LOGMSG("ecx_setupnic: muxBind init for gei: %d failed\n", 
+                 unit_no, 2, 3, 4, 5, 6);
+      goto exit;
    }
 
    /* Get reference tp END obje */
@@ -186,11 +207,11 @@ int ecx_setupnic(ecx_portt *port, const char *ifname, int secondary)
 
    if (port->pktDev.endObj == NULL)
    {
-       /* fail */
-       NIC_LOGMSG("error_hook:  endFindByName failed, device gei: %d not found\n",
-                  unit_no, 2, 3, 4, 5, 6);
-       goto exit;
-   } 
+      /* fail */
+      NIC_LOGMSG("error_hook:  endFindByName failed, device gei: %d not found\n",
+                 unit_no, 2, 3, 4, 5, 6);
+      goto exit;
+   }
 
    if (secondary)
    {
@@ -236,17 +257,17 @@ int ecx_setupnic(ecx_portt *port, const char *ifname, int secondary)
       /* Create mailboxes for each potential EtherCAT frame index */
       for (i = 0; i < EC_MAXBUF; i++)
       {
-          port->msgQId[i] = msgQCreate(1, sizeof(M_BLK_ID), MSG_Q_FIFO);
-          if (port->msgQId[i] == MSG_Q_ID_NULL)
-          {
-              NIC_LOGMSG("ecx_setupnic: Failed to create MsgQ[%d]",
-                  i, 2, 3, 4, 5, 6);
-              goto exit;
-          }
+         port->msgQId[i] = msgQCreate(1, sizeof(M_BLK_ID), MSG_Q_FIFO);
+         if (port->msgQId[i] == MSG_Q_ID_NULL)
+         {
+            NIC_LOGMSG("ecx_setupnic: Failed to create MsgQ[%d]",
+                       i, 2, 3, 4, 5, 6);
+            goto exit;
+         }
       }
       ecx_clear_rxbufstat(&(port->rxbufstat[0]));
-   }   
-    
+   }
+
    /* setup ethernet headers in tx buffers so we don't have to repeat it */
    for (i = 0; i < EC_MAXBUF; i++) 
    {
@@ -254,9 +275,9 @@ int ecx_setupnic(ecx_portt *port, const char *ifname, int secondary)
       port->rxbufstat[i] = EC_BUF_EMPTY;
    }
    ec_setupheader(&(port->txbuf2));
-   
+
    return 1;
-   
+
 exit:
 
    return 0;
@@ -271,20 +292,31 @@ int ecx_closenic(ecx_portt *port)
 {
    int i;
    ETHERCAT_PKT_DEV * pPktDev;
+   M_BLK_ID trash_can;
 
    pPktDev = &(port->pktDev);
 
    for (i = 0; i < EC_MAXBUF; i++)
    {
-       if (port->msgQId[i] != MSG_Q_ID_NULL)
-       {
-           msgQDelete(port->msgQId[i]);
+      if (port->msgQId[i] != MSG_Q_ID_NULL)
+      {
+         if (msgQReceive(port->msgQId[i], 
+                         (char *)&trash_can, 
+                         sizeof(M_BLK_ID), 
+                         NO_WAIT) != ERROR)
+         {
+            NIC_LOGMSG("ecx_closenic: idx %d MsgQ close\n", i,
+                        2, 3, 4, 5, 6);
+                  /* Free resources */
+            netMblkClChainFree(trash_can);
+         }
+         msgQDelete(port->msgQId[i]);
        }
    }
 
    if (pPktDev->pCookie != NULL)
    {
-        muxUnbind(pPktDev->pCookie, MUX_PROTO_SNARF, mux_rx_callback);
+      muxUnbind(pPktDev->pCookie, MUX_PROTO_SNARF, mux_rx_callback);
    }
 
    /* Clean redundant resources if available*/
@@ -295,6 +327,16 @@ int ecx_closenic(ecx_portt *port)
       {
          if (port->redport->msgQId[i] != MSG_Q_ID_NULL)
          {
+            if (msgQReceive(port->redport->msgQId[i], 
+                            (char *)&trash_can, 
+                            sizeof(M_BLK_ID), 
+                            NO_WAIT) != ERROR)
+            {
+               NIC_LOGMSG("ecx_closenic: idx %d MsgQ close\n", i,
+                          2, 3, 4, 5, 6);
+               /* Free resources */
+               netMblkClChainFree(trash_can);
+            }
             msgQDelete(port->redport->msgQId[i]);
          }
       }
@@ -329,12 +371,10 @@ void ec_setupheader(void *p)
  * @param[in] port        = port context struct
  * @return new index.
  */
-int ecx_getindex(ecx_portt *port)
+uint8 ecx_getindex(ecx_portt *port)
 {
-   int idx;
-   int cnt;
-   MSG_Q_ID msgQId;
-   M_BLK_ID trash_can;
+   uint8 idx;
+   uint8 cnt;
 
    semTake(port->sem_get_index, WAIT_FOREVER);
    
@@ -356,27 +396,6 @@ int ecx_getindex(ecx_portt *port)
       }
    }
    port->rxbufstat[idx] = EC_BUF_ALLOC;
-
-   /* Clean up any abandoned frames */
-   msgQId = port->msgQId[idx];
-   if (msgQReceive(msgQId, (char *)&trash_can, sizeof(M_BLK_ID), NO_WAIT) == OK)
-   {
-       /* Free resources */
-       netMblkClChainFree(trash_can);
-   }
-
-   if (port->redstate != ECT_RED_NONE)
-   {
-       port->redport->rxbufstat[idx] = EC_BUF_ALLOC;
-       /* Clean up any abandoned frames */
-       msgQId = port->redport->msgQId[idx];
-       if (msgQReceive(msgQId, (char *)&trash_can, sizeof(M_BLK_ID), NO_WAIT) == OK)
-       {
-           /* Free resources */
-           netMblkClChainFree(trash_can);
-       }
-   }
-      
    port->lastidx = idx;
    
    semGive(port->sem_get_index);
@@ -389,7 +408,7 @@ int ecx_getindex(ecx_portt *port)
  * @param[in] idx      = index in buffer array
  * @param[in] bufstat  = status to set
  */
-void ecx_setbufstat(ecx_portt *port, int idx, int bufstat)
+void ecx_setbufstat(ecx_portt *port, uint8 idx, int bufstat)
 {
    port->rxbufstat[idx] = bufstat;
    if (port->redstate != ECT_RED_NONE)
@@ -398,35 +417,59 @@ void ecx_setbufstat(ecx_portt *port, int idx, int bufstat)
 
 /** Low level transmit buffer over mux layer 2 driver
 * 
-* @param[in] pPktDev     = packet device to send buffer over 
+* @param[in] pPktDev     = packet device to send buffer over
+* @param[in] idx         = index in tx buffer array
 * @param[in] buf         = buff to send
 * @param[in] len         = bytes to send
 * @return driver send result
 */
-static int ec_outfram_send(ETHERCAT_PKT_DEV * pPktDev, void * buf, int len)
+static int ec_outfram_send(ETHERCAT_PKT_DEV * pPktDev, uint8 idx, void * buf, int len)
 {
-    STATUS status = OK;
-    M_BLK_ID pPacket;
-    int rval = 0;
+   STATUS status = OK;
+   M_BLK_ID pPacket = NULL;
+   int rval = 0;
+   END_OBJ *endObj = (END_OBJ *)pPktDev->endObj;
+   MSG_Q_ID  msgQId;
 
-    /* Allocate m_blk to send */
-    if ((pPacket = netTupleGet(pPktDev->endObj->pNetPool,
-        len,
-        M_DONTWAIT,
-        MT_DATA,
-        TRUE)) == NULL)
+   /* Clean up any abandoned frames and re-use the allocated buffer*/
+   msgQId = pPktDev->port->msgQId[idx];
+   if(msgQNumMsgs(msgQId) > 0)
    {
-       NIC_LOGMSG("ec_outfram_send: Could not allocate MBLK memory!\n", 1, 2, 3, 4, 5, 6);
-        return ERROR;
+      pPktDev->abandoned_count++;
+      NIC_LOGMSG("ec_outfram_send: idx %d MsgQ abandoned\n", idx,
+                 2, 3, 4, 5, 6);
+      if (msgQReceive(msgQId, 
+                     (char *)&pPacket, 
+                     sizeof(M_BLK_ID), 
+                     NO_WAIT) == ERROR)
+      {
+         pPacket = NULL;
+         NIC_LOGMSG("ec_outfram_send: idx %d MsgQ mBlk handled by receiver\n", idx,
+                    2, 3, 4, 5, 6);
+      }
+   }
+
+   if (pPacket == NULL)
+   {
+      /* Allocate m_blk to send */
+      if ((pPacket = netTupleGet(endObj->pNetPool,
+                                 len,
+                                 M_DONTWAIT,
+                                 MT_DATA,
+                                 TRUE)) == NULL)
+      {
+         NIC_LOGMSG("ec_outfram_send: Could not allocate MBLK memory!\n", 1, 2, 3, 4, 5, 6);
+         return ERROR;
+      }
    }
 
    pPacket->mBlkHdr.mLen = len;
-   pPacket->mBlkHdr.mFlags |= M_HEADER;
+   pPacket->mBlkHdr.mFlags |= M_PKTHDR;
    pPacket->mBlkHdr.mData = pPacket->pClBlk->clNode.pClBuf;
-   pPacket->mBlkPktHdr.len  = len; 
+   pPacket->mBlkPktHdr.len = pPacket->m_len;
 
    netMblkFromBufCopy(pPacket, buf, 0, pPacket->mBlkHdr.mLen, M_DONTWAIT, NULL);
-   status = muxTkSend(pPktDev->pCookie, pPacket, NULL, htons(ETH_P_ECAT), NULL);
+   status = muxSend(endObj, pPacket);
 
    if (status == OK)
    {
@@ -457,7 +500,7 @@ static int ec_outfram_send(ETHERCAT_PKT_DEV * pPktDev, void * buf, int len)
 * @param[in] stacknumber  = 0=Primary 1=Secondary stack
 * @return socket send result
 */
-int ecx_outframe(ecx_portt *port, int idx, int stacknumber)
+int ecx_outframe(ecx_portt *port, uint8 idx, int stacknumber)
 {
    int rval = 0;
    ec_stackT *stack;
@@ -475,7 +518,7 @@ int ecx_outframe(ecx_portt *port, int idx, int stacknumber)
    }
 
    (*stack->rxbufstat)[idx] = EC_BUF_TX;
-   rval = ec_outfram_send(pPktDev, (char*)(*stack->txbuf)[idx], 
+   rval = ec_outfram_send(pPktDev, idx, (char*)(*stack->txbuf)[idx], 
                           (*stack->txbuflength)[idx]);
    if (rval > 0)
    {
@@ -494,7 +537,7 @@ int ecx_outframe(ecx_portt *port, int idx, int stacknumber)
  * @param[in] idx   = index in tx buffer array
  * @return socket send result
  */
-int ecx_outframe_red(ecx_portt *port, int idx)
+int ecx_outframe_red(ecx_portt *port, uint8 idx)
 {
    ec_comt *datagramP;
    ec_etherheadert *ehp;
@@ -516,12 +559,12 @@ int ecx_outframe_red(ecx_portt *port, int idx)
       ehp->sa1 = htons(secMAC[1]);
       /* transmit over secondary interface */
       port->redport->rxbufstat[idx] = EC_BUF_TX;
-      rval = ec_outfram_send(&(port->redport->pktDev), &(port->txbuf2), port->txbuflength2);
+      rval = ec_outfram_send(&(port->redport->pktDev), idx, &(port->txbuf2), port->txbuflength2);
       if (rval <= 0)
       {
          port->redport->rxbufstat[idx] = EC_BUF_EMPTY;
       }
-   }   
+   }
    
    return rval;
 }
@@ -538,84 +581,92 @@ int ecx_outframe_red(ecx_portt *port, int idx)
 static int mux_rx_callback(void* pCookie, long type, M_BLK_ID pMblk, LL_HDR_INFO *llHdrInfo, void *muxUserArg)
 {
    BOOL ret = FALSE;
-   int idxf;
+   uint8 idxf;
    ec_comt *ecp;
    ec_bufT * tempbuf;
    ecx_portt * port;
    MSG_Q_ID  msgQId;
    ETHERCAT_PKT_DEV * pPktDev;
    int  length;
+   int bufstat;
 
    /* check if it is an EtherCAT frame */
    if (type == ETH_P_ECAT)
    {
-        length = pMblk->mBlkHdr.mLen;
-        tempbuf = (ec_bufT *)pMblk->mBlkHdr.mData;
-        pPktDev = (ETHERCAT_PKT_DEV *)muxUserArg;
-        port = pPktDev->port;
+      length = pMblk->mBlkHdr.mLen;
+      tempbuf = (ec_bufT *)pMblk->mBlkHdr.mData;
+      pPktDev = (ETHERCAT_PKT_DEV *)muxUserArg;
+      port = pPktDev->port;
 
-        /* Get ethercat frame header */
-        ecp = (ec_comt*)&(*tempbuf)[ETH_HEADERSIZE];
-        idxf = ecp->index;
-        if (idxf >= EC_MAXBUF)
-        {
-            NIC_LOGMSG("mux_rx_callback: idx %d out of bounds\n", idxf,
-                2, 3, 4, 5, 6);
-            return ret;
-        }
+      /* Get ethercat frame header */
+      ecp = (ec_comt*)&(*tempbuf)[ETH_HEADERSIZE];
+      idxf = ecp->index;
+      if (idxf >= EC_MAXBUF)
+      {
+         NIC_LOGMSG("mux_rx_callback: idx %d out of bounds\n", idxf,
+                    2, 3, 4, 5, 6);
+         return ret;
+      }
 
-        /* Check if it is the redundant port or not */
-        if (pPktDev->redundant == 1)
-        {
-            msgQId = port->redport->msgQId[idxf];
-        }
-        else
-        {
-            msgQId = port->msgQId[idxf];
-        }
+      /* Check if it is the redundant port or not */
+      if (pPktDev->redundant == 1)
+      {
+         bufstat = port->redport->rxbufstat[idxf];
+         msgQId = port->redport->msgQId[idxf];
+      }
+      else
+      {
+         bufstat = port->rxbufstat[idxf];
+         msgQId = port->msgQId[idxf];
+      }
 
-        if (length > 0)
-        {
-            /* Post the frame to the reqceive Q for the EtherCAT stack */
-            STATUS status;
-            status = msgQSend(msgQId, (char *)&pMblk, sizeof(M_BLK_ID),
-                              NO_WAIT, MSG_PRI_NORMAL);
+      /* Check length and if someone expects the frame */
+      if (length > 0 && bufstat == EC_BUF_TX)
+      {
+         /* Post the frame to the receive Q for the EtherCAT stack */
+         STATUS status;
+         status = msgQSend(msgQId, (char *)&pMblk, sizeof(M_BLK_ID),
+                           NO_WAIT, MSG_PRI_NORMAL);
+         if (status == OK)
+         {
+            NIC_WVEVENT(ECAT_RECV_OK, (char *)&length, sizeof(length));
+            ret = TRUE;
+         }
+         else if ((status == ERROR) && (errno == S_objLib_OBJ_UNAVAILABLE))
+         {
+            /* Try to empty the MSGQ since we for some strange reason
+             * already have a frame in the MsqQ,
+             * is it due to timeout when receiving?
+             * We want the latest received frame in the buffer
+             */
+            port->pktDev.overrun_count++;
+            NIC_LOGMSG("mux_rx_callback: idx %d MsgQ overrun\n", idxf,
+                       2, 3, 4, 5, 6);
+            M_BLK_ID trash_can;
+            if (msgQReceive(msgQId, 
+                            (char *)&trash_can,
+                            sizeof(M_BLK_ID), 
+                            NO_WAIT) != ERROR)
+            {
+                /* Free resources */
+                netMblkClChainFree(trash_can);
+            }
+            status = msgQSend(msgQId, 
+                             (char *)&pMblk, 
+                              sizeof(M_BLK_ID),
+                              NO_WAIT, 
+                              MSG_PRI_NORMAL);
             if (status == OK)
             {
-                NIC_WVEVENT(ECAT_RECV_OK, (char *)&length, sizeof(length));
-                ret = TRUE;
+               NIC_WVEVENT(ECAT_RECV_RETRY_OK, (char *)&length, sizeof(length));
+               ret = TRUE;
             }
-            else if ((status == ERROR) && (errno == S_objLib_OBJ_UNAVAILABLE))
-            {
-                /* Try to empty the MSGQ since we for some strange reason
-                * already have a frame in the MsqQ,
-                * is it due to timeout when receiving?
-                * We want the latest received frame in the buffer
-                */
-                port->pktDev.overrun_count++;
-                NIC_LOGMSG("mux_rx_callback: idx %d MsgQ overrun\n", idxf,
-                    2, 3, 4, 5, 6);
-                M_BLK_ID trash_can;
-                if (msgQReceive(msgQId, (char *)&trash_can,
-                    sizeof(M_BLK_ID), NO_WAIT) == OK)
-                {
-                    /* Free resources */
-                    netMblkClChainFree(trash_can);
-                }
-
-                status = msgQSend(msgQId, (char *)&pMblk, sizeof(M_BLK_ID),
-                    NO_WAIT, MSG_PRI_NORMAL);
-                if (status == OK)
-                {
-                    NIC_WVEVENT(ECAT_RECV_RETRY_OK, (char *)&length, sizeof(length));
-                    ret = TRUE;
-                }
-            }
-            else
-            {
-                NIC_WVEVENT(ECAT_RECV_FAILED, (char *)&length, sizeof(length));
-            }
-       }
+         }
+         else
+         {
+            NIC_WVEVENT(ECAT_RECV_FAILED, (char *)&length, sizeof(length));
+         }
+      }
    }
 
    return ret;
@@ -627,11 +678,11 @@ static int mux_rx_callback(void* pCookie, long type, M_BLK_ID pMblk, LL_HDR_INFO
  * @param[in] timeout    = timeout in us
  * @return >0 if frame is available and read
  */
-static int ecx_recvpkt(ecx_portt *port, int idx, int stacknumber, M_BLK_ID * pMblk, int timeout)
+static int ecx_recvpkt(ecx_portt *port, uint8 idx, int stacknumber, M_BLK_ID * pMblk, int timeout)
 {
    int bytesrx = 0;
    MSG_Q_ID  msgQId;
-   int tick_timeout = max((timeout / 1000), 1);
+   int tick_timeout = max((timeout / usec_per_tick), 1);
    
    if (stacknumber == 1)
    {
@@ -677,7 +728,7 @@ static int ecx_recvpkt(ecx_portt *port, int idx, int stacknumber, M_BLK_ID * pMb
  * @return Workcounter if a frame is found with corresponding index, otherwise
  * EC_NOFRAME or EC_OTHERFRAME.
  */
-int ecx_inframe(ecx_portt *port, int idx, int stacknumber, int timeout)
+int ecx_inframe(ecx_portt *port, uint8 idx, int stacknumber, int timeout)
 {
    uint16  l;
    int     rval;
@@ -741,7 +792,7 @@ int ecx_inframe(ecx_portt *port, int idx, int stacknumber, int timeout)
  * @return Workcounter if a frame is found with corresponding index, otherwise
  * EC_NOFRAME.
  */
-static int ecx_waitinframe_red(ecx_portt *port, int idx, osal_timert *timer, int timeout)
+static int ecx_waitinframe_red(ecx_portt *port, uint8 idx, osal_timert *timer, int timeout)
 {
    osal_timert timer2;
    int wkc  = EC_NOFRAME;
@@ -830,7 +881,7 @@ static int ecx_waitinframe_red(ecx_portt *port, int idx, osal_timert *timer, int
  * @return Workcounter if a frame is found with corresponding index, otherwise
  * EC_NOFRAME.
  */
-int ecx_waitinframe(ecx_portt *port, int idx, int timeout)
+int ecx_waitinframe(ecx_portt *port, uint8 idx, int timeout)
 {
    int wkc;
    osal_timert timer;
@@ -853,7 +904,7 @@ int ecx_waitinframe(ecx_portt *port, int idx, int timeout)
  * @param[in] timeout  = timeout in us
  * @return Workcounter or EC_NOFRAME
  */
-int ecx_srconfirm(ecx_portt *port, int idx, int timeout)
+int ecx_srconfirm(ecx_portt *port, uint8 idx, int timeout)
 {
    int wkc = EC_NOFRAME;
    osal_timert timer1, timer2;
@@ -892,37 +943,37 @@ int ec_closenic(void)
    return ecx_closenic(&ecx_port);
 }
 
-int ec_getindex(void)
+uint8 ec_getindex(void)
 {
    return ecx_getindex(&ecx_port);
 }
 
-void ec_setbufstat(int idx, int bufstat)
+void ec_setbufstat(uint8 idx, int bufstat)
 {
    ecx_setbufstat(&ecx_port, idx, bufstat);
 }
 
-int ec_outframe(int idx, int stacknumber)
+int ec_outframe(uint8 idx, int stacknumber)
 {
    return ecx_outframe(&ecx_port, idx, stacknumber);
 }
 
-int ec_outframe_red(int idx)
+int ec_outframe_red(uint8 idx)
 {
    return ecx_outframe_red(&ecx_port, idx);
 }
 
-int ec_inframe(int idx, int stacknumber)
+int ec_inframe(uint8 idx, int stacknumber, int timeout)
 {
-   return ecx_inframe(&ecx_port, idx, stacknumber);
+   return ecx_inframe(&ecx_port, idx, stacknumber, timeout);
 }
 
-int ec_waitinframe(int idx, int timeout)
+int ec_waitinframe(uint8 idx, int timeout)
 {
    return ecx_waitinframe(&ecx_port, idx, timeout);
 }
 
-int ec_srconfirm(int idx, int timeout)
+int ec_srconfirm(uint8 idx, int timeout)
 {
    return ecx_srconfirm(&ecx_port, idx, timeout);
 }

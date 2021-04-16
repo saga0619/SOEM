@@ -70,7 +70,7 @@ void simpletest(char *ifname)
          ec_receive_processdata(EC_TIMEOUTRET);
          /* request OP state for all slaves */
          ec_writestate(0);
-         chk = 40;
+         chk = 200;
          /* wait for all slaves to reach OP state */
          do
          {
@@ -139,7 +139,7 @@ void simpletest(char *ifname)
     }
     else
     {
-        printf("No socket connection on %s\nExcecute as root\n",ifname);
+        printf("No socket connection on %s\nExecute as root\n",ifname);
     }
 }
 

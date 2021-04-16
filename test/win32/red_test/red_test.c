@@ -81,7 +81,7 @@ void redtest(char *ifname, char *ifname2)
          /* request OP state for all slaves */
          ec_writestate(0);
          /* wait for all slaves to reach OP state */
-         ec_statecheck(0, EC_STATE_OPERATIONAL,  EC_TIMEOUTSTATE);
+         ec_statecheck(0, EC_STATE_OPERATIONAL, 5 * EC_TIMEOUTSTATE);
          oloop = ec_slave[0].Obytes;
          if ((oloop == 0) && (ec_slave[0].Obits > 0)) oloop = 1;
          if (oloop > 8) oloop = 8;
@@ -142,7 +142,7 @@ void add_timespec(struct timespec *ts, int64 addtime)
    sec = (addtime - nsec) / NSEC_PER_SEC;
    ts->tv_sec += sec;
    ts->tv_nsec += nsec;
-   if ( ts->tv_nsec > NSEC_PER_SEC )
+   if ( ts->tv_nsec >= NSEC_PER_SEC )
    {
       nsec = ts->tv_nsec % NSEC_PER_SEC;
       ts->tv_sec += (ts->tv_nsec - nsec) / NSEC_PER_SEC;
